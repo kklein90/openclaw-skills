@@ -1,0 +1,4 @@
+interface:
+  display_name: "RSS Monitor"
+  short_description: "Track RSS and Atom feeds for research workflows"
+  default_prompt: "Use this skill to manage feed lists, pull headlines, and summarize selected articles on demand."
