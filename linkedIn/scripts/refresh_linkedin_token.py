@@ -3,6 +3,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import stat
 import sys
 import urllib.parse
 import urllib.error
@@ -10,6 +11,7 @@ import urllib.request
 
 
 LINKEDIN_TOKEN_URL = "https://www.linkedin.com/oauth/v2/accessToken"
+TOKEN_FILE_MODE = 0o600
 
 
 def _arg_parser() -> argparse.ArgumentParser:
@@ -39,26 +41,65 @@ def _arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--print-export",
         action="store_true",
-        help="Also print export lines for shell usage.",
+        help="Also print export lines for shell usage. Warning: prints live secrets to stdout.",
+    )
+    parser.add_argument(
+        "--persist-client-secret",
+        action="store_true",
+        help="Persist client_secret to token store. By default client_secret is not written to disk.",
     )
     return parser
 
 
-def _load_token_store(path: str | None) -> dict:
+def _warn(message: str) -> None:
+    print(json.dumps({"ok": False, "warning": message}))
+
+
+def _validate_token_store_path(path: str | None) -> Path | None:
     if not path:
+        return None
+    token_file = Path(path).expanduser().resolve()
+    lower_parts = {part.lower() for part in token_file.parts}
+    risky_markers = {".git", "github", "gitlab", "dropbox", "onedrive", "icloud", "syncthing"}
+    if lower_parts & risky_markers:
+        raise ValueError(
+            "Refusing risky token-store path. Do not place LinkedIn secrets inside git repos or synced folders."
+        )
+    return token_file
+
+
+def _check_token_file_permissions(token_file: Path) -> None:
+    try:
+        mode = stat.S_IMODE(token_file.stat().st_mode)
+    except FileNotFoundError:
+        return
+    if mode & 0o077:
+        _warn(
+            f"Token store permissions are too broad ({oct(mode)}). Restrict to owner-only, for example chmod 600 {token_file}."
+        )
+
+
+def _load_token_store(path: str | None) -> dict:
+    token_file = _validate_token_store_path(path)
+    if not token_file or not token_file.exists():
         return {}
-    token_file = Path(path)
-    if not token_file.exists():
-        return {}
+    _check_token_file_permissions(token_file)
     return json.loads(token_file.read_text(encoding="utf-8"))
 
 
 def _save_token_store(path: str | None, data: dict) -> None:
-    if not path:
+    token_file = _validate_token_store_path(path)
+    if not token_file:
         return
-    token_file = Path(path)
     token_file.parent.mkdir(parents=True, exist_ok=True)
-    token_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    fd = os.open(token_file, flags, TOKEN_FILE_MODE)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(data, indent=2))
+            handle.write("\n")
+    finally:
+        os.chmod(token_file, TOKEN_FILE_MODE)
 
 
 def _refresh_access_token(refresh_token: str, client_id: str, client_secret: str) -> dict:
@@ -144,11 +185,14 @@ def main() -> int:
             "access_token": access_token,
             "refresh_token": next_refresh_token,
             "client_id": client_id,
-            "client_secret": client_secret,
             "expires_in": refreshed.get("expires_in"),
             "refresh_token_expires_in": refreshed.get("refresh_token_expires_in"),
         }
     )
+    if args.persist_client_secret:
+        store["client_secret"] = client_secret
+    else:
+        store.pop("client_secret", None)
     _save_token_store(args.token_store, store)
 
     result = {
@@ -159,6 +203,9 @@ def main() -> int:
         "token_store": args.token_store,
     }
     if args.print_export:
+        result["warning"] = (
+            "print-export emits live secrets to stdout. Avoid shell history, logs, and chat paste leaks."
+        )
         result["exports"] = [
             f"export LINKEDIN_ACCESS_TOKEN='{access_token}'",
             f"export LINKEDIN_REFRESH_TOKEN='{next_refresh_token}'",

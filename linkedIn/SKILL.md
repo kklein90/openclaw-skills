@@ -26,6 +26,16 @@ Before posting, confirm these are available:
 - `LINKEDIN_VERSION`: LinkedIn API version header in `YYYYMM` format (example: `202603`)
 - `LINKEDIN_TOKEN_STORE` (optional): JSON file path where tokens are loaded/saved
 
+## Security notes
+
+- Treat `LINKEDIN_ACCESS_TOKEN`, `LINKEDIN_REFRESH_TOKEN`, and especially `LINKEDIN_CLIENT_SECRET` as sensitive secrets.
+- Do **not** put `LINKEDIN_TOKEN_STORE` inside a git repo, Dropbox, OneDrive, iCloud, Syncthing, or other synced/shared folders.
+- The scripts now write token stores with owner-only permissions (`0600`) and refuse obviously risky storage paths.
+- By default, `client_secret` is **not** persisted to disk. To persist it anyway, pass `--persist-client-secret`.
+- `--print-export` prints live secrets to stdout. Use it sparingly and never paste the output into chat or shared docs.
+- Prefer `--dry-run` before any live post.
+- Public posting should require explicit human approval.
+
 Token scopes depend on author type:
 
 - Member posting: `w_member_social`
@@ -62,6 +72,15 @@ For auto refresh while posting:
 python3 skills/linkedIn/scripts/linkedin_post.py \
   --message "Token-refresh-enabled post" \
   --auto-refresh
+```
+
+If you intentionally want to persist `client_secret` in the token store too:
+
+```bash
+python3 skills/linkedIn/scripts/linkedin_post.py \
+  --message "Token-refresh-enabled post" \
+  --auto-refresh \
+  --persist-client-secret
 ```
 
 ## Refresh token manually
