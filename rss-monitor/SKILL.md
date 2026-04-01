@@ -76,6 +76,14 @@ python scripts/fetch_article_text.py "https://example.com/post" --format json --
 - Summarize only links the user explicitly asks to summarize.
 - When summarizing, cite the article URL and clarify if extraction was partial (for example due to paywalls or script-heavy pages).
 
+## Security Notes
+
+- This skill fetches untrusted network content from configured feed URLs and article URLs.
+- Feed and article URLs are restricted to `http`/`https` and now reject localhost, private IPs, and other non-public network targets.
+- Response sizes are capped to reduce risk from unexpectedly large feeds or pages.
+- Feed list writes use a temporary file + rename pattern to reduce corruption risk.
+- This skill does not store secrets and should not require credentials for normal RSS/Atom usage.
+
 ## Resources
 
 - `scripts/manage_feeds.py`: Initialize/add/list/remove monitored feeds.

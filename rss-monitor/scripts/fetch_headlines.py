@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
+import socket
 import ssl
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -17,6 +19,7 @@ import xml.etree.ElementTree as ET
 
 DEFAULT_FEEDS_FILE = Path(__file__).resolve().parent.parent / "assets" / "feeds.json"
 DEFAULT_TIMEOUT_SECONDS = 15
+DEFAULT_MAX_FEED_BYTES = 1_000_000
 
 
 def load_feeds(path: Path) -> list[dict[str, Any]]:
@@ -115,7 +118,57 @@ def parse_atom(root: ET.Element) -> list[dict[str, str]]:
     return entries
 
 
-def fetch_feed(url: str, timeout: int) -> list[dict[str, str]]:
+def validate_public_url(url: str) -> None:
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError("URL must use http or https.")
+    if not parsed.netloc:
+        raise ValueError("URL must include a host.")
+
+    hostname = parsed.hostname
+    if not hostname:
+        raise ValueError("URL must include a valid hostname.")
+
+    lowered = hostname.lower()
+    if lowered in {"localhost", "localhost.localdomain"}:
+        raise ValueError("Refusing localhost URL.")
+
+    try:
+        ip = ipaddress.ip_address(lowered)
+    except ValueError:
+        try:
+            infos = socket.getaddrinfo(hostname, None)
+        except socket.gaierror:
+            return
+        for info in infos:
+            candidate = info[4][0]
+            try:
+                resolved_ip = ipaddress.ip_address(candidate)
+            except ValueError:
+                continue
+            if (
+                resolved_ip.is_private
+                or resolved_ip.is_loopback
+                or resolved_ip.is_link_local
+                or resolved_ip.is_multicast
+                or resolved_ip.is_reserved
+                or resolved_ip.is_unspecified
+            ):
+                raise ValueError("Refusing URL that resolves to a non-public IP address.")
+        return
+
+    if (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_multicast
+        or ip.is_reserved
+        or ip.is_unspecified
+    ):
+        raise ValueError("Refusing non-public IP address.")
+
+
+def fetch_feed(url: str, timeout: int, max_bytes: int) -> list[dict[str, str]]:
     req = Request(
         url=url,
         headers={
@@ -126,7 +179,19 @@ def fetch_feed(url: str, timeout: int) -> list[dict[str, str]]:
 
     context = ssl.create_default_context()
     with urlopen(req, timeout=timeout, context=context) as response:
-        content = response.read()
+        content_length = response.headers.get("Content-Length")
+        if content_length:
+            try:
+                if int(content_length) > max_bytes:
+                    raise ValueError(
+                        f"Feed response too large ({content_length} bytes). Limit is {max_bytes} bytes."
+                    )
+            except ValueError as exc:
+                if "Feed response too large" in str(exc):
+                    raise
+        content = response.read(max_bytes + 1)
+        if len(content) > max_bytes:
+            raise ValueError(f"Feed exceeded limit of {max_bytes} bytes.")
 
     root = ET.fromstring(content)
     tag = root.tag.lower()
@@ -192,6 +257,7 @@ def main() -> int:
     parser.add_argument("--include", action="append", default=[], help="Include keyword filter (repeatable or comma-separated).")
     parser.add_argument("--exclude", action="append", default=[], help="Exclude keyword filter (repeatable or comma-separated).")
     parser.add_argument("--limit-per-feed", type=int, default=10, help="Max items per feed.")
+    parser.add_argument("--max-bytes", type=int, default=DEFAULT_MAX_FEED_BYTES, help="Maximum feed response size in bytes.")
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_SECONDS, help="Network timeout in seconds.")
     parser.add_argument("--format", choices=("text", "json"), default="text", help="Output format.")
     args = parser.parse_args()
@@ -229,13 +295,9 @@ def main() -> int:
             errors.append(f"{name}: missing URL")
             continue
 
-        parsed = urlparse(url)
-        if parsed.scheme not in ("http", "https"):
-            errors.append(f"{name}: unsupported URL scheme '{parsed.scheme or 'none'}'")
-            continue
-
         try:
-            entries = fetch_feed(url, timeout=args.timeout)
+            validate_public_url(url)
+            entries = fetch_feed(url, timeout=args.timeout, max_bytes=args.max_bytes)
         except (URLError, ET.ParseError, ValueError, TimeoutError) as exc:
             errors.append(f"{name}: {exc}")
             continue

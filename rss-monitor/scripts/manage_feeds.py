@@ -4,9 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
+import socket
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 DEFAULT_FEEDS_FILE = Path(__file__).resolve().parent.parent / "assets" / "feeds.json"
 
@@ -23,7 +26,59 @@ def load_feeds(path: Path) -> dict[str, Any]:
 
 def save_feeds(path: Path, data: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(json.dumps(data, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+    tmp_path.replace(path)
+
+
+def validate_feed_url(url: str) -> None:
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError("Feed URL must use http or https.")
+    if not parsed.netloc:
+        raise ValueError("Feed URL must include a host.")
+
+    hostname = parsed.hostname
+    if not hostname:
+        raise ValueError("Feed URL must include a valid hostname.")
+
+    lowered = hostname.lower()
+    if lowered in {"localhost", "localhost.localdomain"}:
+        raise ValueError("Refusing localhost feed URL.")
+
+    try:
+        ip = ipaddress.ip_address(lowered)
+    except ValueError:
+        try:
+            infos = socket.getaddrinfo(hostname, None)
+        except socket.gaierror:
+            return
+        for info in infos:
+            candidate = info[4][0]
+            try:
+                resolved_ip = ipaddress.ip_address(candidate)
+            except ValueError:
+                continue
+            if (
+                resolved_ip.is_private
+                or resolved_ip.is_loopback
+                or resolved_ip.is_link_local
+                or resolved_ip.is_multicast
+                or resolved_ip.is_reserved
+                or resolved_ip.is_unspecified
+            ):
+                raise ValueError("Refusing feed URL that resolves to a non-public IP address.")
+        return
+
+    if (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_multicast
+        or ip.is_reserved
+        or ip.is_unspecified
+    ):
+        raise ValueError("Refusing non-public feed IP address.")
 
 
 def normalize_csv_list(raw: str | None) -> list[str]:
@@ -51,6 +106,12 @@ def command_add(args: argparse.Namespace) -> int:
     url = args.url.strip()
     category = args.category.strip()
     tags = normalize_csv_list(args.tags)
+
+    if not name:
+        raise ValueError("Feed name cannot be empty.")
+    if not category:
+        raise ValueError("Category cannot be empty.")
+    validate_feed_url(url)
 
     for item in data["feeds"]:
         if item.get("name", "").lower() == name.lower():
